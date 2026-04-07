@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  app:
+    image: matiashr1991/aconacon:latest
+    build: .
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL}
+      - NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+      - NODE_ENV=production
+    networks:
+      - traefik_public
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.acon-app.rule=Host(`${DOMAIN:-acon.localhost}`)"
+        - "traefik.http.routers.acon-app.entrypoints=websecure"
+        - "traefik.http.routers.acon-app.tls=true"
+        - "traefik.http.routers.acon-app.tls.certresolver=letsencrypt"
+        - "traefik.http.services.acon-app.loadbalancer.server.port=3000"
+
+# Assuming you already have a network for Traefik
+networks:
+  traefik_public:
+    external: true
