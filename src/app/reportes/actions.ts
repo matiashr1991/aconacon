@@ -19,12 +19,27 @@ export async function getSalesBatchesAction() {
 }
 
 // Utility to build the where clause for sales
-function buildSalesConditions(saleBatchId: string, salesDateFrom?: string, salesDateTo?: string) {
+function buildSalesConditions(
+  saleBatchId: string, 
+  salesDateFrom?: string, 
+  salesDateTo?: string,
+  filters?: {
+    seller?: string;
+    supplier?: string;
+    customer?: string;
+    productCode?: string;
+  }
+) {
   const conditions = [];
   if (saleBatchId) conditions.push(eq(schema.saleLine.import_batch_id, saleBatchId));
   if (salesDateFrom) conditions.push(gte(schema.saleLine.sale_date, salesDateFrom));
   if (salesDateTo) conditions.push(lte(schema.saleLine.sale_date, salesDateTo));
   
+  if (filters?.seller) conditions.push(eq(schema.saleLine.seller, filters.seller));
+  if (filters?.supplier) conditions.push(eq(schema.saleLine.supplier_text, filters.supplier));
+  if (filters?.customer) conditions.push(eq(schema.saleLine.customer, filters.customer));
+  if (filters?.productCode) conditions.push(eq(schema.saleLine.product_code, filters.productCode));
+
   // Exclude credit notes from performance/profitability calculations
   conditions.push(eq(schema.saleLine.is_credit_note, false));
   
@@ -236,9 +251,17 @@ export async function getProfitabilityGroupedByCustomerAction(saleBatchId: strin
 /**
  * Group profitability by seller.
  */
-export async function getProfitabilityGroupedBySellerAction(saleBatchId: string, salesDateFrom?: string, salesDateTo?: string) {
+export async function getProfitabilityGroupedBySellerAction(
+  saleBatchId: string, 
+  salesDateFrom?: string, 
+  salesDateTo?: string,
+  searchQuery?: string
+) {
   try {
     const conditions = buildSalesConditions(saleBatchId, salesDateFrom, salesDateTo);
+    if (searchQuery) {
+      conditions.push(ilike(schema.saleLine.seller, `%${searchQuery}%`));
+    }
 
     const data = await db
       .select({
@@ -256,9 +279,112 @@ export async function getProfitabilityGroupedBySellerAction(saleBatchId: string,
       .leftJoin(schema.saleLineProfit, eq(schema.saleLine.id, schema.saleLineProfit.sale_line_id))
       .where(conditions.length > 0 ? and(...conditions) : undefined)
       .groupBy(sql`COALESCE(NULLIF(TRIM(${schema.saleLine.seller}), ''), 'SIN VENDEDOR')`)
-      .orderBy(sql`SUM(${schema.saleLine.net_subtotal}::numeric) DESC`);
+      .orderBy(sql`SUM(${schema.saleLineProfit.gross_margin_amount}::numeric) DESC`);
 
     return { success: true, data };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Generic Performance Drill-down Action
+ * Sorts by Gross Margin DESC (Mayor a Menor) as requested.
+ */
+export async function getPerformanceDataAction(
+  saleBatchId: string,
+  groupBy: 'seller' | 'supplier' | 'product' | 'customer',
+  salesDateFrom?: string,
+  salesDateTo?: string,
+  filters?: {
+    seller?: string;
+    supplier?: string;
+    customer?: string;
+  }
+) {
+  try {
+    const conditions = buildSalesConditions(saleBatchId, salesDateFrom, salesDateTo, filters);
+    
+    let groupColumn;
+    let selectFields: any = {
+      totalQuantity: sql<number>`SUM(${schema.saleLine.quantity}::numeric)`,
+      totalSalesNet: sql<number>`SUM(${schema.saleLine.net_subtotal}::numeric)`,
+      totalCostAmount: sql<number>`SUM(${schema.saleLineProfit.cost_total}::numeric)`,
+      totalGrossMargin: sql<number>`SUM(${schema.saleLineProfit.gross_margin_amount}::numeric)`,
+      marginPct: sql<number>`
+        CASE WHEN ABS(SUM(${schema.saleLine.net_subtotal}::numeric)) > 0 
+        THEN (SUM(${schema.saleLineProfit.gross_margin_amount}::numeric) / ABS(SUM(${schema.saleLine.net_subtotal}::numeric))) * 100 
+        ELSE 0 END`
+    };
+
+    if (groupBy === 'seller') {
+      groupColumn = sql`COALESCE(NULLIF(TRIM(${schema.saleLine.seller}), ''), 'SIN VENDEDOR')`;
+      selectFields.id = groupColumn;
+      selectFields.name = groupColumn;
+    } else if (groupBy === 'supplier') {
+      groupColumn = sql`COALESCE(NULLIF(TRIM(${schema.saleLine.supplier_text}), ''), 'SIN PROVEEDOR')`;
+      selectFields.id = groupColumn;
+      selectFields.name = groupColumn;
+    } else if (groupBy === 'product') {
+      groupColumn = schema.saleLine.product_code;
+      selectFields.id = groupColumn;
+      // We concat code and description for better entity naming
+      selectFields.name = sql<string>`MAX(${schema.saleLine.product_description})`; 
+      selectFields.code = schema.saleLine.product_code;
+    } else {
+      groupColumn = sql`COALESCE(NULLIF(TRIM(${schema.saleLine.customer}), ''), 'SIN CLIENTE')`;
+      selectFields.id = groupColumn;
+      selectFields.name = groupColumn;
+    }
+
+    const data = await db
+      .select(selectFields)
+      .from(schema.saleLine)
+      .leftJoin(schema.saleLineProfit, eq(schema.saleLine.id, schema.saleLineProfit.sale_line_id))
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .groupBy(groupColumn)
+      .orderBy(sql`SUM(${schema.saleLineProfit.gross_margin_amount}::numeric) DESC NULLS LAST`)
+      .limit(200);
+
+    // Post-filter: Remove items with $0 margin AND $0 sales to avoid "garbage" in rankings
+    // but keep them if they have units (optional, but requested to clean up)
+    const filteredData = (data as any[]).filter(item => {
+      const margin = Number(item.totalGrossMargin || 0);
+      const sales = Number(item.totalSalesNet || 0);
+      return Math.abs(margin) > 0.01 || Math.abs(sales) > 0.01;
+    });
+
+    return { success: true, data: filteredData };
+  } catch (error: any) {
+    console.error('Error Performance Drill-down:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Fetches unique filter values for the performance dashboard.
+ */
+export async function getPerformanceFiltersAction(saleBatchId: string) {
+  try {
+    const sellers = await db
+      .selectDistinct({ value: schema.saleLine.seller })
+      .from(schema.saleLine)
+      .where(and(eq(schema.saleLine.import_batch_id, saleBatchId), sql`${schema.saleLine.seller} IS NOT NULL`))
+      .orderBy(schema.saleLine.seller);
+
+    const suppliers = await db
+      .selectDistinct({ value: schema.saleLine.supplier_text })
+      .from(schema.saleLine)
+      .where(and(eq(schema.saleLine.import_batch_id, saleBatchId), sql`${schema.saleLine.supplier_text} IS NOT NULL`))
+      .orderBy(schema.saleLine.supplier_text);
+
+    return { 
+      success: true, 
+      data: { 
+        sellers: sellers.map(s => s.value).filter(Boolean),
+        suppliers: suppliers.map(s => s.value).filter(Boolean)
+      } 
+    };
   } catch (error: any) {
     return { success: false, error: error.message };
   }

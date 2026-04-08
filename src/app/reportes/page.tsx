@@ -8,11 +8,14 @@ import {
   getProfitabilityGroupedByProductAction,
   getProfitabilityGroupedBySupplierAction,
   runProfitabilityMatchAction,
-  getDrilldownLinesAction
+  getDrilldownLinesAction,
+  getPerformanceDataAction,
+  getPerformanceFiltersAction
 } from './actions';
 import { 
   PieChart, Calendar, RefreshCcw, Loader2, FileSpreadsheet, Activity, DollarSign, 
-  TrendingUp, CheckCircle2, AlertCircle, Box, Truck, Search, ChevronRight, X, Info, HelpCircle
+  TrendingUp, CheckCircle2, AlertCircle, Box, Truck, Search, ChevronRight, X, Info, HelpCircle,
+  BarChart2, Users, ShoppingCart, ArrowLeft, ArrowUpRight, Percent
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -28,8 +31,19 @@ export default function ReportesPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
   
-  // Tabs
+  // Perspective Switcher
+  const [viewMode, setViewMode] = useState<'operativo' | 'performance'>('operativo');
+  
+  // Tabs for Operativo
   const [reportType, setReportType] = useState<'details' | 'products' | 'suppliers'>('details');
+  
+  // Drill-down Context for Performance
+  const [drillPath, setDrillPath] = useState<{ type: 'global' | 'seller' | 'supplier', value?: string, label?: string }[]>([{ type: 'global', label: 'Global' }]);
+  const [performanceData, setPerformanceData] = useState<any[]>([]);
+  const [performanceLoading, setPerformanceLoading] = useState(false);
+  const [filterValues, setFilterValues] = useState<{ sellers: string[], suppliers: string[] }>({ sellers: [], suppliers: [] });
+  const [selectedSellerFilter, setSelectedSellerFilter] = useState('');
+  const [selectedSupplierFilter, setSelectedSupplierFilter] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [isComputing, setIsComputing] = useState(false);
@@ -47,6 +61,7 @@ export default function ReportesPage() {
   const [selectedDrilldown, setSelectedDrilldown] = useState<{ type: 'product' | 'supplier', value: string, title: string } | null>(null);
   const [drilldownData, setDrilldownData] = useState<any[]>([]);
   const [isDrilldownLoading, setIsDrilldownLoading] = useState(false);
+  const [modalSearchQuery, setModalSearchQuery] = useState('');
   
   useEffect(() => {
     getSalesBatchesAction().then(res => {
@@ -56,6 +71,19 @@ export default function ReportesPage() {
       }
     });
   }, []);
+
+  useEffect(() => {
+    if (selectedBatch) {
+      getPerformanceFiltersAction(selectedBatch).then(res => {
+        if (res.success && res.data) {
+          setFilterValues({
+            sellers: (res.data.sellers || []).filter((s): s is string => !!s),
+            suppliers: (res.data.suppliers || []).filter((s): s is string => !!s)
+          });
+        }
+      });
+    }
+  }, [selectedBatch]);
 
 
   const loadData = async (batchId: string, page = 1, searchOverride?: string) => {
@@ -84,11 +112,75 @@ export default function ReportesPage() {
     setLoading(false);
   };
 
+  const loadPerformanceData = async () => {
+    if (!selectedBatch) return;
+    setPerformanceLoading(true);
+
+    const currentLevel = drillPath[drillPath.length - 1];
+    
+    // Determine what to group by and what filters to apply based on hierarchy
+    let groupBy: 'seller' | 'supplier' | 'product' | 'customer' = 'seller';
+    let filters: any = {};
+
+    if (selectedSellerFilter) filters.seller = selectedSellerFilter;
+    if (selectedSupplierFilter) filters.supplier = selectedSupplierFilter;
+
+    // Hierarchy Logic
+    if (currentLevel.type === 'global') {
+      groupBy = selectedSellerFilter ? 'supplier' : 'seller';
+    } else if (currentLevel.type === 'seller') {
+      groupBy = 'supplier';
+      filters.seller = currentLevel.value;
+    } else if (currentLevel.type === 'supplier') {
+      groupBy = 'product';
+      filters.supplier = currentLevel.value;
+      // If we are in Level 2 (Seller) and Level 3 (Supplier), we need BOTH filters
+      const sellerLevel = drillPath.find(p => p.type === 'seller');
+      if (sellerLevel) filters.seller = sellerLevel.value;
+    }
+
+    const res = await getPerformanceDataAction(
+      selectedBatch, 
+      groupBy, 
+      salesDateFrom, 
+      salesDateTo, 
+      filters
+    );
+
+    if (res.success) {
+      setPerformanceData(res.data || []);
+    }
+    setPerformanceLoading(false);
+  };
+
   useEffect(() => {
     if (hasGenerated) {
-      loadData(selectedBatch, metadata.page || 1);
+      if (viewMode === 'operativo') {
+        loadData(selectedBatch, metadata.page || 1);
+      } else {
+        loadPerformanceData();
+      }
     }
-  }, [reportType, appliedSearch, hasGenerated]);
+  }, [reportType, appliedSearch, hasGenerated, viewMode, drillPath, selectedSellerFilter, selectedSupplierFilter]);
+
+  const formatCurrency = (val: string | number | null) => {
+    if (val === null || val === undefined) return '-';
+    const num = Number(val);
+    return isNaN(num) ? '-' : new Intl.NumberFormat('es-AR', { 
+      style: 'currency', 
+      currency: 'ARS',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(num);
+  };
+
+  const navigateToLevel = (type: 'global' | 'seller' | 'supplier', value: string, label: string) => {
+    setDrillPath(prev => [...prev, { type, value, label }]);
+  };
+
+  const resetHierarchy = () => {
+    setDrillPath([{ type: 'global', label: 'Global' }]);
+  };
 
   const handleSearch = () => {
     setAppliedSearch(searchQuery);
@@ -112,16 +204,6 @@ export default function ReportesPage() {
     setTimeout(() => setIsComputing(false), 800);
   };
 
-  const formatCurrency = (val: string | number | null) => {
-    if (val === null || val === undefined) return '-';
-    const num = Number(val);
-    return isNaN(num) ? '-' : new Intl.NumberFormat('es-AR', { 
-      style: 'currency', 
-      currency: 'ARS',
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(num);
-  };
 
   const loadDrilldownData = async (type: 'product' | 'supplier', value: string) => {
     if (!selectedBatch) return;
@@ -138,8 +220,21 @@ export default function ReportesPage() {
       loadDrilldownData(selectedDrilldown.type, selectedDrilldown.value);
     } else {
       setDrilldownData([]);
+      setModalSearchQuery('');
     }
   }, [selectedDrilldown]);
+
+  // Derived filtered data for the modal
+  const filteredDrilldownData = drilldownData.filter(line => {
+    if (!modalSearchQuery) return true;
+    const search = modalSearchQuery.toLowerCase();
+    return (
+      (line.vendedor?.toLowerCase().includes(search)) ||
+      (line.customer?.toLowerCase().includes(search)) ||
+      (line.productCode?.toLowerCase().includes(search)) ||
+      (line.saleDate?.includes(search))
+    );
+  });
 
   return (
     <div className="space-y-6 relative">
@@ -174,9 +269,25 @@ export default function ReportesPage() {
         <div className="space-y-1">
           <h1 className="text-3xl font-bold tracking-tight text-slate-900 flex items-center gap-3">
             <PieChart className="w-8 h-8 text-indigo-600" />
-            Control de Rentabilidad Avanzado
+            Inteligencia de Negocios
           </h1>
-          <p className="text-slate-500 font-medium">Motor de Inteligencia de Negocios para cruce de listas masivas y análisis de márgenes.</p>
+          <p className="text-slate-500 font-medium">Análisis de rentabilidad operativa y performance comercial avanzada.</p>
+        </div>
+
+        {/* View Mode Toggle */}
+        <div className="bg-slate-100 p-1 rounded-2xl flex items-center shadow-inner">
+          <button 
+            onClick={() => setViewMode('operativo')}
+            className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${viewMode === 'operativo' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <Activity className="w-4 h-4" /> Control Operativo
+          </button>
+          <button 
+            onClick={() => setViewMode('performance')}
+            className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold transition-all ${viewMode === 'performance' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+          >
+            <BarChart2 className="w-4 h-4" /> Performance Comercial
+          </button>
         </div>
       </div>
 
@@ -220,6 +331,42 @@ export default function ReportesPage() {
             />
           </div>
         </div>
+
+        <AnimatePresence>
+          {viewMode === 'performance' && (
+            <motion.div 
+              initial={{ height: 0, opacity: 0 }} 
+              animate={{ height: 'auto', opacity: 1 }} 
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden"
+            >
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-4 border-t border-slate-100">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Filtrar por Vendedor</label>
+                  <select 
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 font-medium"
+                    value={selectedSellerFilter}
+                    onChange={(e) => setSelectedSellerFilter(e.target.value)}
+                  >
+                    <option value="">Todos los Vendedores</option>
+                    {filterValues.sellers.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Filtrar por Marca / Proveedor</label>
+                  <select 
+                    className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50 font-medium"
+                    value={selectedSupplierFilter}
+                    onChange={(e) => setSelectedSupplierFilter(e.target.value)}
+                  >
+                    <option value="">Todas las Marcas</option>
+                    {filterValues.suppliers.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 pt-4 border-t border-slate-100 items-end">
           <div className="md:col-span-2">
@@ -303,7 +450,7 @@ export default function ReportesPage() {
             </p>
           </div>
         </motion.div>
-      ) : (
+      ) : viewMode === 'operativo' ? (
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm flex flex-col">
         {/* Tab Header */}
         <div className="flex flex-col sm:flex-row items-center justify-between px-6 py-4 border-b border-slate-100 gap-4">
@@ -598,6 +745,150 @@ export default function ReportesPage() {
           </div>
         )}
       </div>
+    ) : (
+      <div className="flex flex-col gap-6">
+        {/* Performance Dashboard UI */}
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-sm overflow-hidden flex flex-col">
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-4">
+              <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
+                <BarChart2 className="w-6 h-6" />
+              </div>
+              <div>
+                 <h2 className="text-xl font-black text-slate-900 tracking-tight leading-none mb-1">Análisis de Performance Hierárquico</h2>
+                 <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Vista actual:</span>
+                    <nav className="flex items-center text-xs">
+                      {drillPath.map((path, idx) => (
+                        <React.Fragment key={idx}>
+                          {idx > 0 && <ChevronRight className="w-3 h-3 mx-1 text-slate-300" />}
+                          <button 
+                            onClick={() => setDrillPath(drillPath.slice(0, idx + 1))}
+                            className={`font-bold hover:underline ${idx === drillPath.length - 1 ? 'text-indigo-600' : 'text-slate-500'}`}
+                          >
+                            {path.label}
+                          </button>
+                        </React.Fragment>
+                      ))}
+                    </nav>
+                 </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+               <button 
+                 onClick={resetHierarchy}
+                 className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl transition-all"
+                 title="Resetear a Global"
+               >
+                 <RefreshCcw className="w-5 h-5" />
+               </button>
+            </div>
+          </div>
+
+          {/* Performance Hierarchy Table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100 uppercase text-[10px] font-black text-slate-400 tracking-widest">
+                  <th className="px-4 py-4">Ranking</th>
+                  <th className="px-4 py-4">
+                    {(() => {
+                      const level = drillPath[drillPath.length - 1].type;
+                      if (level === 'global' && !selectedSellerFilter) return 'Vendedor';
+                      if (level === 'global' || level === 'seller') return 'Marca / Proveedor';
+                      return 'Artículo / Producto';
+                    })()}
+                  </th>
+                  <th className="px-4 py-4 text-center">Unidades</th>
+                  <th className="px-4 py-4 text-right">Facturación</th>
+                  <th className="px-4 py-4 text-right border-l border-slate-100 bg-indigo-50/30">Margen Nominal ($)</th>
+                  <th className="px-4 py-4 text-center bg-indigo-50/30">% Peso</th>
+                  <th className="px-4 py-4"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {performanceLoading ? (
+                  <tr>
+                    <td colSpan={7} className="py-20 text-center text-slate-400 font-bold">
+                       <div className="flex flex-col items-center gap-3">
+                         <Loader2 className="w-10 h-10 animate-spin text-indigo-600" />
+                         Analizando performance...
+                       </div>
+                    </td>
+                  </tr>
+                ) : performanceData.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="py-20 text-center text-slate-400 border-2 border-dashed border-slate-100 rounded-3xl m-4">
+                      No hay datos disponibles en este nivel de granularidad.
+                    </td>
+                  </tr>
+                ) : (
+                  performanceData.map((row, idx) => {
+                    const totalMargin = performanceData.reduce((acc, r) => acc + Number(r.totalGrossMargin || 0), 0);
+                    const weight = totalMargin > 0 ? (Number(row.totalGrossMargin) / totalMargin) * 100 : 0;
+                    
+                    const currentLevel = drillPath[drillPath.length - 1];
+                    let nextType: any = null;
+                    if (currentLevel.type === 'global' && !selectedSellerFilter) nextType = 'seller';
+                    else if (currentLevel.type === 'global' || currentLevel.type === 'seller') nextType = 'supplier';
+
+                    return (
+                      <tr key={idx} className="group/perf transition-all hover:bg-slate-50/50">
+                        <td className="px-4 py-5">
+                          <span className="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-black text-slate-400 group-hover/perf:bg-indigo-600 group-hover/perf:text-white transition-colors">
+                            {idx + 1}
+                          </span>
+                        </td>
+                        <td className="px-4 py-5">
+                          <div className="flex flex-col">
+                            <span className="font-bold text-slate-900 text-sm">{row.name}</span>
+                            {row.code && <span className="text-[10px] text-slate-400 font-mono">{row.code}</span>}
+                          </div>
+                        </td>
+                        <td className="px-4 py-5 text-center font-bold text-slate-600 tabular-nums">
+                          {Number(row.totalQuantity).toLocaleString('es-AR')}
+                        </td>
+                        <td className="px-4 py-5 text-right font-medium text-slate-500 tabular-nums">
+                           {formatCurrency(row.totalSalesNet)}
+                        </td>
+                        <td className="px-4 py-5 text-right border-l border-slate-100 bg-indigo-50/10 group-hover/perf:bg-indigo-50/40">
+                           <div className="flex flex-col items-end">
+                              <span className="font-black text-indigo-700">{formatCurrency(row.totalGrossMargin)}</span>
+                              <span className={`text-[10px] font-bold ${Number(row.marginPct) > 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{Number(row.marginPct).toFixed(2)}%</span>
+                           </div>
+                        </td>
+                        <td className="px-4 py-5 text-center bg-indigo-50/10 group-hover/perf:bg-indigo-50/40">
+                           <div className="flex flex-col items-center gap-1.5 w-full min-w-[120px]">
+                              <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden">
+                                 <motion.div 
+                                   initial={{ width: 0 }} 
+                                   animate={{ width: `${Math.min(weight, 100)}%` }}
+                                   className="h-full bg-indigo-600 rounded-full"
+                                 />
+                              </div>
+                              <span className="text-[11px] font-black text-indigo-900">{weight.toFixed(1)}% peso</span>
+                           </div>
+                        </td>
+                        <td className="px-4 py-5 text-right">
+                           {nextType && (
+                             <button 
+                               onClick={() => navigateToLevel(nextType, row.id, row.name)}
+                               className="p-2 rounded-xl bg-white border border-slate-200 text-slate-400 hover:text-indigo-600 hover:border-indigo-200 shadow-sm transition-all"
+                             >
+                               <ChevronRight className="w-4 h-4" />
+                             </button>
+                           )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
     )}
 
       {/* Drill-down Modal */}
@@ -622,11 +913,34 @@ export default function ReportesPage() {
                   <div>
                     <span className="text-[10px] font-black uppercase tracking-widest text-indigo-500 block mb-0.5">Desglose Detallado</span>
                     <h2 className="text-xl font-black text-slate-900 flex items-center gap-2">
-                       {selectedDrilldown.title}
-                       <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{selectedDrilldown.value}</span>
+                       {selectedDrilldown?.title}
+                       <span className="text-xs font-medium text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{selectedDrilldown?.value}</span>
                     </h2>
                   </div>
                 </div>
+                
+                {/* Modal Search Filter */}
+                <div className="flex-1 max-w-md mx-8">
+                  <div className="relative group">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-indigo-500 transition-colors" />
+                    <input 
+                      type="text"
+                      placeholder="Filtrar por vendedor, cliente o fecha..."
+                      value={modalSearchQuery}
+                      onChange={(e) => setModalSearchQuery(e.target.value)}
+                      className="w-full pl-11 pr-4 py-2.5 bg-slate-50 border border-slate-100 rounded-2xl text-sm font-medium focus:bg-white focus:outline-none focus:ring-4 focus:ring-indigo-500/5 focus:border-indigo-500 transition-all"
+                    />
+                    {modalSearchQuery && (
+                      <button 
+                        onClick={() => setModalSearchQuery('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-lg hover:bg-slate-200 text-slate-400 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <button 
                   onClick={() => setSelectedDrilldown(null)}
                   className="w-10 h-10 rounded-full bg-slate-50 flex items-center justify-center text-slate-400 hover:bg-rose-50 hover:text-rose-500 transition-all shadow-sm"
@@ -708,7 +1022,7 @@ export default function ReportesPage() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {drilldownData.map((line) => {
+                          {filteredDrilldownData.map((line) => {
                             const saleGross = Number(line.saleGrossUnitPrice) || 0;
                             const saleNet = Number(line.saleUnitPrice) || 0;
                             const costGross = Number(line.costUnitGross) || 0;
@@ -782,16 +1096,16 @@ export default function ReportesPage() {
                 <div className="text-[10px] text-slate-400 font-medium">
                    Análisis de doble margen efectuado con costos netos recalculados.
                 </div>
-                <div className="flex items-center gap-6">
-                   <div className="flex flex-col items-end">
-                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Venta Total</span>
-                     <span className="text-sm font-black text-slate-900">{formatCurrency(drilldownData.reduce((acc, l) => acc + Number(l.saleNetTotal || 0), 0))}</span>
-                   </div>
-                   <div className="flex flex-col items-end border-l border-slate-200 pl-6">
-                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Rentabilidad</span>
-                     <span className="text-sm font-black text-emerald-600">{formatCurrency(drilldownData.reduce((acc, l) => acc + Number(l.grossMargin || 0), 0))}</span>
-                   </div>
-                </div>
+                 <div className="flex items-center gap-6">
+                    <div className="flex flex-col items-end">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Venta Total</span>
+                      <span className="text-sm font-black text-slate-900">{formatCurrency(filteredDrilldownData.reduce((acc, l) => acc + Number(l.saleNetTotal || 0), 0))}</span>
+                    </div>
+                    <div className="flex flex-col items-end border-l border-slate-200 pl-6">
+                      <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Rentabilidad</span>
+                      <span className="text-sm font-black text-emerald-600">{formatCurrency(filteredDrilldownData.reduce((acc, l) => acc + Number(l.grossMargin || 0), 0))}</span>
+                    </div>
+                 </div>
               </div>
             </motion.div>
           </div>
